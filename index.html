@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>دفتر مصاريفي</title>
+<meta name="description" content="تابع مرتبك والتزاماتك ومدخراتك أول بأول" />
+<meta name="theme-color" content="#1F4D3E" />
+<link rel="manifest" href="manifest.json" />
+<link rel="apple-touch-icon" href="icons/icon-192.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="دفتر مصاريفي" />
+<link rel="icon" href="icons/icon-192.png" />
+
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<style>
+  html, body { margin: 0; padding: 0; background: #F3ECD8; }
+  #root { min-height: 100vh; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef } = React;
+
+const fmt = (n) => {
+  const num = Number(n) || 0;
+  return num.toLocaleString("ar-EG", { maximumFractionDigits: 0 });
+};
+
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+
+const ymToNum = (ym) => {
+  const [y, m] = ym.split("-").map(Number);
+  return y * 12 + (m - 1);
+};
+const currentYM = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+};
+const monthsBetween = (fromYM, toYM) => ymToNum(toYM) - ymToNum(fromYM);
+
+const monthsUntilEnd = (endDate) => {
+  if (!endDate) return null;
+  return monthsBetween(currentYM(), endDate);
+};
+
+const FREQ_LABEL = { 1: "شهري", 3: "كل 3 شهور", 6: "كل 6 شهور", 12: "سنوي" };
+
+const commitmentStatus = (c) => {
+  const now = currentYM();
+  const start = c.startMonth || now;
+  const freq = Number(c.frequency) || 1;
+  const diff = monthsBetween(start, now);
+  if (c.endDate && ymToNum(now) > ymToNum(c.endDate)) {
+    return { due: false, ended: true, monthsUntilNext: null };
+  }
+  if (diff < 0) return { due: false, ended: false, monthsUntilNext: -diff };
+  const mod = diff % freq;
+  return { due: mod === 0, ended: false, monthsUntilNext: mod === 0 ? 0 : freq - mod };
+};
+
+const DEFAULT_CATEGORIES = ["الأكل", "المواصلات", "فواتير"];
+const STORAGE_KEY = "dafter-masareefy-data";
+
+// ---- local, on-device storage (works fully offline, no server involved) ----
+const localStore = {
+  get: () => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (e) {
+      return null;
+    }
+  },
+  set: (data) => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    } catch (e) {}
+  },
+};
+
+function LedgerApp() {
+  const [loaded, setLoaded] = useState(false);
+  const [salary, setSalary] = useState("");
+  const [savingsGoal, setSavingsGoal] = useState("");
+  const [commitments, setCommitments] = useState([]);
+  const [expenses, setExpenses] = useState([]);
+  const [categories, setCategories] = useState(DEFAULT_CATEGORIES);
+  const [summaryView, setSummaryView] = useState("total");
+
+  const [cName, setCName] = useState("");
+  const [cAmount, setCAmount] = useState("");
+  const [cFreq, setCFreq] = useState("1");
+  const [cStart, setCStart] = useState("");
+  const [cEndDate, setCEndDate] = useState("");
+
+  const [eName, setEName] = useState("");
+  const [eAmount, setEAmount] = useState("");
+  const [eCategory, setECategory] = useState("");
+  const [showNewCat, setShowNewCat] = useState(false);
+  const [newCatInput, setNewCatInput] = useState("");
+  const [newCatManager, setNewCatManager] = useState("");
+
+  const [stampPulse, setStampPulse] = useState(false);
+  const wasGoalMet = useRef(false);
+
+  const [copied, setCopied] = useState(false);
+  const [installEvt, setInstallEvt] = useState(null);
+  const [showInstallBanner, setShowInstallBanner] = useState(false);
+
+  useEffect(() => {
+    const d = localStore.get();
+    if (d) {
+      setSalary(d.salary ?? "");
+      setSavingsGoal(d.savingsGoal ?? "");
+      setCommitments(Array.isArray(d.commitments) ? d.commitments : []);
+      setExpenses(Array.isArray(d.expenses) ? d.expenses : []);
+      setCategories(Array.isArray(d.categories) && d.categories.length ? d.categories : DEFAULT_CATEGORIES);
+    }
+    setLoaded(true);
+
+    const onBeforeInstall = (e) => {
+      e.preventDefault();
+      setInstallEvt(e);
+      setShowInstallBanner(true);
+    };
+    window.addEventListener("beforeinstallprompt", onBeforeInstall);
+    return () => window.removeEventListener("beforeinstallprompt", onBeforeInstall);
+  }, []);
+
+  useEffect(() => {
+    if (!loaded) return;
+    localStore.set({ salary, savingsGoal, commitments, expenses, categories });
+  }, [loaded, salary, savingsGoal, commitments, expenses, categories]);
+
+  const dueCommitments = commitments.filter((c) => commitmentStatus(c).due);
+  const totalCommitments = dueCommitments.reduce((s, c) => s + (Number(c.amount) || 0), 0);
+  const totalMonthlyAvg = commitments.reduce((s, c) => s + (Number(c.amount) || 0) / (Number(c.frequency) || 1), 0);
+  const totalExpenses = expenses.reduce((s, e) => s + (Number(e.amount) || 0), 0);
+  const salaryNum = Number(salary) || 0;
+  const goalNum = Number(savingsGoal) || 0;
+  const remaining = salaryNum - totalCommitments - totalExpenses;
+  const diffFromGoal = remaining - goalNum;
+  const goalMet = goalNum > 0 && remaining >= goalNum;
+  const progressPct = goalNum > 0 ? Math.max(0, Math.min(100, (remaining / goalNum) * 100)) : 0;
+
+  const expensesByCategory = expenses.reduce((acc, e) => {
+    const k = e.category || "بدون بند";
+    acc[k] = (acc[k] || 0) + (Number(e.amount) || 0);
+    return acc;
+  }, {});
+  const sortedCategories = Object.entries(expensesByCategory).sort((a, b) => b[1] - a[1]);
+
+  const tips = (() => {
+    const out = [];
+    if (salaryNum <= 0) {
+      out.push({ type: "tip", text: "دخّل المرتب الشهري الأول عشان أقدر أديك تحليل دقيق." });
+      return out;
+    }
+    if (remaining < 0) {
+      out.push({ type: "warn", text: `أنت بتصرف أكتر من مرتبك بـ ${fmt(Math.abs(remaining))} ج.م الشهر ده. لازم توقف أي مصروف مش ضروري فورًا لحد ما توازن الميزانية.` });
+    }
+    const commitRatio = salaryNum > 0 ? (totalCommitments / salaryNum) * 100 : 0;
+    if (commitRatio > 50) {
+      out.push({ type: "warn", text: `الالتزامات الثابتة بتاخد ${Math.round(commitRatio)}% من مرتبك، وده أعلى من الحد الآمن (النسبة المثالية أقل من 50%). لو فيه قسط بيقرب يخلص، متجددش التزام جديد مكانه غير لما تراجع وضعك.` });
+    }
+    if (sortedCategories.length > 0) {
+      const [topCat, topAmt] = sortedCategories[0];
+      const catRatio = totalExpenses > 0 ? (topAmt / totalExpenses) * 100 : 0;
+      if (catRatio > 35) {
+        out.push({ type: "tip", text: `بند "${topCat}" لوحده بياخد ${Math.round(catRatio)}% من مصاريفك اليومية (${fmt(topAmt)} ج.م). راجعه كويس، فيه غالبًا مجال تقلل فيه.` });
+      }
+    }
+    const savingsRate = salaryNum > 0 ? (remaining / salaryNum) * 100 : 0;
+    if (goalNum > 0) {
+      if (goalMet) {
+        out.push({ type: "good", text: `حققت هدف الادخار وعندك فايض ${fmt(diffFromGoal)} ج.م. فكر تحوّل الفايض لحساب توفير أو شهادة ادخار بدل ما يفضل سايب.` });
+      } else {
+        out.push({ type: "tip", text: `لسه ناقصك ${fmt(goalNum - remaining)} ج.م عشان توصل لهدف الادخار. لو قدرت تقلل أعلى بند مصروف بنسبة 10-15% غالبًا هتقفل الفجوة دي.` });
+      }
+    } else if (savingsRate < 10 && remaining >= 0) {
+      out.push({ type: "tip", text: `مفيش هدف ادخار متحدد، ولو استمريت كده هتوفر أقل من 10% من مرتبك. حاول تحدد هدف ولو بسيط (حتى لو 5-10%) وثبّته كل شهر.` });
+    }
+    if (out.length === 0) {
+      out.push({ type: "good", text: "وضعك المالي الشهر ده متوازن. استمر على نفس النمط." });
+    }
+    return out;
+  })();
+
+  const monthLabel = new Date().toLocaleDateString("ar-EG", { month: "long", year: "numeric" });
+
+  const buildReportText = () => {
+    const lines = [];
+    lines.push(`تقرير مصاريف — ${monthLabel}`);
+    lines.push("");
+    lines.push(`المرتب: ${fmt(salaryNum)} ج.م`);
+    lines.push(`الالتزامات المستحقة: ${fmt(totalCommitments)} ج.م`);
+    dueCommitments.forEach((c) => lines.push(`  - ${c.name}: ${fmt(c.amount)} ج.م`));
+    lines.push(`المصاريف: ${fmt(totalExpenses)} ج.م`);
+    sortedCategories.forEach(([cat, amt]) => lines.push(`  - ${cat}: ${fmt(amt)} ج.م`));
+    lines.push("");
+    lines.push(`المتبقي فعليًا: ${fmt(remaining)} ج.م`);
+    if (goalNum > 0) lines.push(`هدف الادخار: ${fmt(goalNum)} ج.م (${goalMet ? "تحقق" : "لسه"})`);
+    lines.push("");
+    lines.push("نصايح:");
+    tips.forEach((t) => lines.push(`  • ${t.text}`));
+    return lines.join("\n");
+  };
+
+  useEffect(() => {
+    if (goalMet && !wasGoalMet.current) {
+      setStampPulse(true);
+      const t = setTimeout(() => setStampPulse(false), 900);
+      wasGoalMet.current = true;
+      return () => clearTimeout(t);
+    }
+    if (!goalMet) wasGoalMet.current = false;
+  }, [goalMet]);
+
+  const addCommitment = () => {
+    if (!cName.trim() || !cAmount || Number(cAmount) <= 0) return;
+    setCommitments((prev) => [...prev, { id: uid(), name: cName.trim(), amount: cAmount, frequency: cFreq, startMonth: cStart || null, endDate: cEndDate || null }]);
+    setCName(""); setCAmount(""); setCFreq("1"); setCStart(""); setCEndDate("");
+  };
+
+  const addCategory = (name) => {
+    const trimmed = name.trim();
+    if (!trimmed || categories.includes(trimmed)) return trimmed;
+    setCategories((prev) => [...prev, trimmed]);
+    return trimmed;
+  };
+
+  const confirmNewCategoryFromExpenseForm = () => {
+    const added = addCategory(newCatInput);
+    if (added) setECategory(added);
+    setNewCatInput(""); setShowNewCat(false);
+  };
+
+  const addExpense = () => {
+    if (!eCategory || !eAmount || Number(eAmount) <= 0) return;
+    const today = new Date();
+    const dateLabel = today.toLocaleDateString("ar-EG", { day: "numeric", month: "short" });
+    setExpenses((prev) => [{ id: uid(), name: eName.trim(), category: eCategory, amount: eAmount, date: dateLabel }, ...prev]);
+    setEName(""); setEAmount("");
+  };
+
+  const removeCommitment = (id) => setCommitments((prev) => prev.filter((c) => c.id !== id));
+  const removeExpense = (id) => setExpenses((prev) => prev.filter((e) => e.id !== id));
+  const removeCategory = (name) => setCategories((prev) => prev.filter((c) => c !== name));
+  const startNewMonth = () => setExpenses([]);
+  const exportPDF = () => window.print();
+
+  const copyReport = async () => {
+    const text = buildReportText();
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true); setTimeout(() => setCopied(false), 2000);
+    } catch (e) {
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+        document.body.appendChild(ta); ta.focus(); ta.select();
+        document.execCommand("copy"); document.body.removeChild(ta);
+        setCopied(true); setTimeout(() => setCopied(false), 2000);
+      } catch (e2) { setCopied(false); }
+    }
+  };
+
+  const doInstall = async () => {
+    if (!installEvt) return;
+    installEvt.prompt();
+    await installEvt.userChoice;
+    setShowInstallBanner(false);
+    setInstallEvt(null);
+  };
+
+  return (
+    <div style={styles.page} dir="rtl">
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Amiri:wght@400;700&family=Tajawal:wght@300;400;500;700&display=swap');
+        * { box-sizing: border-box; }
+        .ledger-input, .ledger-select {
+          font-family: 'Tajawal', sans-serif; background: transparent; border: none;
+          border-bottom: 1.5px dashed #C9B98A; padding: 6px 2px; font-size: 14px;
+          color: #1F2A24; outline: none; width: 100%;
+        }
+        .ledger-select { background: #FBF7EB; }
+        .ledger-input::placeholder { color: #A99A6E; }
+        .ledger-input:focus, .ledger-select:focus { border-bottom-color: #B8863F; }
+        .add-btn {
+          font-family: 'Tajawal', sans-serif; font-weight: 700; background: #1F4D3E; color: #F3ECD8;
+          border: none; border-radius: 8px; padding: 9px 16px; font-size: 13px; cursor: pointer;
+          white-space: nowrap; transition: transform 0.12s ease, background 0.12s ease;
+        }
+        .add-btn:active { transform: scale(0.96); background: #163a2f; }
+        .del-btn { background: none; border: none; color: #B0563F; font-size: 17px; cursor: pointer; line-height: 1; padding: 2px 6px; opacity: 0.55; transition: opacity 0.15s ease; }
+        .del-btn:hover { opacity: 1; }
+        .chip { display: inline-flex; align-items: center; gap: 5px; background: #E4D8B4; border: 1px solid #C9B98A; border-radius: 20px; padding: 4px 10px; font-size: 12.5px; margin: 3px 4px 3px 0; }
+        .chip button { background: none; border: none; color: #A23B2E; font-size: 14px; cursor: pointer; line-height: 1; padding: 0; }
+        .toggle-pill { display: flex; background: rgba(255,255,255,0.15); border-radius: 20px; padding: 3px; margin-bottom: 12px; }
+        .toggle-pill button { flex: 1; border: none; background: transparent; color: #C9BE99; font-family: 'Tajawal', sans-serif; font-weight: 500; font-size: 12.5px; padding: 7px 0; border-radius: 16px; cursor: pointer; transition: all 0.15s ease; }
+        .toggle-pill button.active { background: #D8B876; color: #153229; font-weight: 700; }
+        .row-enter { animation: rowIn 0.25s ease; }
+        @keyframes rowIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes stampPop { 0% { transform: scale(0.4) rotate(-18deg); opacity: 0; } 60% { transform: scale(1.12) rotate(-8deg); opacity: 1; } 100% { transform: scale(1) rotate(-8deg); opacity: 1; } }
+        @media print {
+          .no-print { display: none !important; }
+          body { background: #fff !important; }
+          .print-card { background: #fff !important; border: 1px solid #999 !important; color: #111 !important; box-shadow:none !important; }
+          .print-card * { color: #111 !important; }
+          .print-only { display: block !important; }
+        }
+      `}</style>
+
+      {showInstallBanner && (
+        <div className="no-print" style={styles.installBanner}>
+          <span>ثبّت الدفتر كأيقونة على شاشتك؟</span>
+          <div style={{ display: "flex", gap: 6 }}>
+            <button style={styles.installBtn} onClick={doInstall}>تثبيت</button>
+            <button style={styles.installDismiss} onClick={() => setShowInstallBanner(false)}>لأ</button>
+          </div>
+        </div>
+      )}
+
+      <div style={styles.cover}>
+        <div style={styles.coverInnerBorder}>
+          <div style={styles.coverTitle}>دفتر مصاريفي</div>
+          <div style={styles.coverSub}>{monthLabel}</div>
+        </div>
+      </div>
+
+      <div style={styles.card}>
+        <div style={styles.cardTitle}>المرتب والهدف</div>
+        <div style={styles.fieldRow}>
+          <label style={styles.fieldLabel}>المرتب الشهري</label>
+          <input className="ledger-input" style={styles.amountInput} type="number" inputMode="decimal" placeholder="0" value={salary} onChange={(e) => setSalary(e.target.value)} />
+          <span style={styles.currency}>ج.م</span>
+        </div>
+        <div style={styles.fieldRow}>
+          <label style={styles.fieldLabel}>هدف الادخار الشهري</label>
+          <input className="ledger-input" style={styles.amountInput} type="number" inputMode="decimal" placeholder="0" value={savingsGoal} onChange={(e) => setSavingsGoal(e.target.value)} />
+          <span style={styles.currency}>ج.م</span>
+        </div>
+      </div>
+
+      <div className="no-print" style={styles.card}>
+        <div style={styles.cardTitle}>بنود المصاريف</div>
+        <div>
+          {categories.map((cat) => (
+            <span key={cat} className="chip">{cat}<button onClick={() => removeCategory(cat)}>×</button></span>
+          ))}
+          {categories.length === 0 && <div style={styles.emptyNote}>ضيف أول بند تحت</div>}
+        </div>
+        <div style={{ ...styles.addRow, marginTop: 10 }}>
+          <input className="ledger-input" style={{ flex: 1 }} placeholder="بند جديد (زي: ترفيه، صيدلية...)" value={newCatManager} onChange={(e) => setNewCatManager(e.target.value)} />
+          <button className="add-btn" onClick={() => { addCategory(newCatManager); setNewCatManager(""); }}>ضيف بند</button>
+        </div>
+      </div>
+
+      <div style={styles.card}>
+        <div style={styles.cardTitle}>الالتزامات الثابتة والدورية</div>
+        {commitments.length === 0 && <div style={styles.emptyNote}>لسه مفيش التزامات مسجّلة — إيجار، أقساط، اشتراكات...</div>}
+        {commitments.map((c) => {
+          const status = commitmentStatus(c);
+          const endRem = monthsUntilEnd(c.endDate);
+          const freq = Number(c.frequency) || 1;
+          return (
+            <div key={c.id} className="row-enter" style={styles.itemRow}>
+              <button className="del-btn no-print" onClick={() => removeCommitment(c.id)}>×</button>
+              <span style={styles.itemAmount}>{fmt(c.amount)} ج.م</span>
+              <div style={{ flex: 1 }}>
+                <div style={styles.itemName}>{c.name}{freq !== 1 && <span style={styles.freqBadge}>{FREQ_LABEL[freq]}</span>}</div>
+                <div style={styles.monthsTag}>
+                  {status.ended ? <span style={{ color: "#B0563F" }}>الالتزام خلص</span>
+                    : status.due ? <span style={{ color: "#5C8A6E" }}>مستحق الشهر ده</span>
+                    : <span style={{ color: "#B8863F" }}>جاي بعد {status.monthsUntilNext} {status.monthsUntilNext === 1 ? "شهر" : "شهور"}</span>}
+                  {endRem !== null && endRem >= 0 && (
+                    <span style={{ marginRight: 8, color: "#8A7B4E" }}>· باقي {endRem === 0 ? "آخر شهر" : `${endRem} شهر لانتهاء القسط`}</span>
+                  )}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+        <div className="no-print">
+          <div style={styles.addRow}>
+            <input className="ledger-input" style={{ flex: 1 }} placeholder="اسم الالتزام (إيجار، جيم...)" value={cName} onChange={(e) => setCName(e.target.value)} />
+            <input className="ledger-input" style={{ width: 70 }} type="number" inputMode="decimal" placeholder="المبلغ" value={cAmount} onChange={(e) => setCAmount(e.target.value)} />
+            <button className="add-btn" onClick={addCommitment}>ضيف</button>
+          </div>
+          <div style={styles.extraRow}>
+            <select className="ledger-select" style={{ width: 110 }} value={cFreq} onChange={(e) => setCFreq(e.target.value)}>
+              <option value="1">شهري</option>
+              <option value="3">كل 3 شهور</option>
+              <option value="6">كل 6 شهور</option>
+              <option value="12">سنوي</option>
+            </select>
+            <div style={styles.miniField}>
+              <label style={styles.miniLabel}>أول استحقاق</label>
+              <input className="ledger-input" type="month" value={cStart} onChange={(e) => setCStart(e.target.value)} />
+            </div>
+            <div style={styles.miniField}>
+              <label style={styles.miniLabel}>تاريخ الانتهاء (اختياري)</label>
+              <input className="ledger-input" type="month" value={cEndDate} onChange={(e) => setCEndDate(e.target.value)} />
+            </div>
+          </div>
+        </div>
+        {totalCommitments > 0 && <div style={styles.subtotal}>مستحق الشهر ده: {fmt(totalCommitments)} ج.م</div>}
+        {Math.round(totalMonthlyAvg) !== Math.round(totalCommitments) && totalMonthlyAvg > 0 && (
+          <div style={{ ...styles.subtotal, color: "#8A7B4E", fontWeight: 400 }}>متوسط شهري تقريبي (لو حسبت الاشتراكات الدورية موزّعة): {fmt(totalMonthlyAvg)} ج.م</div>
+        )}
+      </div>
+
+      <div style={styles.card}>
+        <div style={styles.cardTitle}>المصاريف اليومية</div>
+        <div className="no-print">
+          <div style={styles.addRow}>
+            <select className="ledger-select" style={{ width: 110 }} value={eCategory} onChange={(e) => { if (e.target.value === "__new__") setShowNewCat(true); else setECategory(e.target.value); }}>
+              <option value="">اختار بند</option>
+              {categories.map((cat) => <option key={cat} value={cat}>{cat}</option>)}
+              <option value="__new__">➕ بند جديد</option>
+            </select>
+            <input className="ledger-input" style={{ flex: 1 }} placeholder="تفاصيل (اختياري)" value={eName} onChange={(e) => setEName(e.target.value)} />
+            <input className="ledger-input" style={{ width: 70 }} type="number" inputMode="decimal" placeholder="المبلغ" value={eAmount} onChange={(e) => setEAmount(e.target.value)} />
+            <button className="add-btn" onClick={addExpense}>ضيف</button>
+          </div>
+          {showNewCat && (
+            <div style={{ ...styles.addRow, marginTop: 6 }}>
+              <input className="ledger-input" style={{ flex: 1 }} placeholder="اسم البند الجديد" value={newCatInput} onChange={(e) => setNewCatInput(e.target.value)} autoFocus />
+              <button className="add-btn" onClick={confirmNewCategoryFromExpenseForm}>تأكيد</button>
+            </div>
+          )}
+        </div>
+        {expenses.length === 0 && <div style={styles.emptyNote}>لسه مفيش مصاريف مسجّلة النهاردة</div>}
+        <div style={{ maxHeight: 260, overflowY: "auto", marginTop: 4 }}>
+          {expenses.map((e) => (
+            <div key={e.id} className="row-enter" style={styles.itemRow}>
+              <button className="del-btn no-print" onClick={() => removeExpense(e.id)}>×</button>
+              <span style={styles.itemAmount}>{fmt(e.amount)} ج.م</span>
+              <div style={{ flex: 1 }}><span style={styles.itemName}>{e.name || e.category}</span><span style={styles.catBadge}>{e.category}</span></div>
+              <span style={styles.itemDate}>{e.date}</span>
+            </div>
+          ))}
+        </div>
+        {totalExpenses > 0 && <div style={styles.subtotal}>إجمالي المصاريف: {fmt(totalExpenses)} ج.م</div>}
+      </div>
+
+      <div className="print-card" style={styles.summaryCard}>
+        <div className="print-only" style={styles.printOnlyTitle}>تقرير مصاريف — {monthLabel}</div>
+        <div className="no-print toggle-pill">
+          <button className={summaryView === "total" ? "active" : ""} onClick={() => setSummaryView("total")}>إجمالي</button>
+          <button className={summaryView === "detailed" ? "active" : ""} onClick={() => setSummaryView("detailed")}>تفصيلي</button>
+        </div>
+        {summaryView === "detailed" && (
+          <div style={styles.detailBlock}>
+            <div style={styles.detailHeading}>الالتزامات المستحقة الشهر ده</div>
+            {dueCommitments.length === 0 && <div style={styles.detailEmpty}>لا يوجد</div>}
+            {dueCommitments.map((c) => <div key={c.id} style={styles.detailRow}><span>{c.name}</span><span>{fmt(c.amount)} ج.م</span></div>)}
+            <div style={{ ...styles.detailHeading, marginTop: 10 }}>المصاريف حسب البند</div>
+            {sortedCategories.length === 0 && <div style={styles.detailEmpty}>لا يوجد</div>}
+            {sortedCategories.map(([cat, amt]) => <div key={cat} style={styles.detailRow}><span>{cat}</span><span>{fmt(amt)} ج.م</span></div>)}
+            <div style={styles.divider} />
+          </div>
+        )}
+        <div style={styles.summaryRow}><span>المرتب</span><span style={styles.summaryVal}>{fmt(salaryNum)}</span></div>
+        <div style={styles.summaryRow}><span>الالتزامات المستحقة</span><span style={{ ...styles.summaryVal, color: "#E8B4A0" }}>-{fmt(totalCommitments)}</span></div>
+        <div style={styles.summaryRow}><span>المصاريف</span><span style={{ ...styles.summaryVal, color: "#E8B4A0" }}>-{fmt(totalExpenses)}</span></div>
+        <div style={styles.divider} />
+        <div style={styles.summaryRowBig}><span>المتبقي فعليًا</span><span style={{ color: remaining >= 0 ? "#D8B876" : "#E8836A" }}>{fmt(remaining)} ج.م</span></div>
+        {goalNum > 0 && (
+          <>
+            <div style={styles.gaugeWrap}>
+              <div style={styles.gaugeTrack}><div style={{ ...styles.gaugeFill, width: `${progressPct}%`, background: goalMet ? "#D8B876" : "#E8836A" }} /></div>
+              <div style={styles.gaugeLabel}>{Math.round(progressPct)}% من هدف الادخار ({fmt(goalNum)} ج.م)</div>
+            </div>
+            {goalMet ? (
+              <div style={{ ...styles.stamp, animation: stampPulse ? "stampPop 0.5s ease" : "none" }}>تم تحقيق هدف الادخار ✓<div style={styles.stampSub}>فايض {fmt(diffFromGoal)} ج.م</div></div>
+            ) : (
+              <div style={styles.warnNote}>لسه ناقصك {fmt(goalNum - remaining)} ج.م عشان توصل لهدف الادخار</div>
+            )}
+          </>
+        )}
+        <div style={styles.tipsBlock}>
+          <div style={styles.tipsHeading}>رأي المحلل المالي</div>
+          {tips.map((t, i) => (
+            <div key={i} style={{ ...styles.tipRow, borderRight: `3px solid ${t.type === "warn" ? "#E8836A" : t.type === "good" ? "#D8B876" : "#8FBBA0"}` }}>{t.text}</div>
+          ))}
+        </div>
+      </div>
+
+      <div className="no-print" style={styles.bottomBtns}>
+        <button style={styles.resetBtn} onClick={startNewMonth}>بداية شهر جديد</button>
+        <button style={styles.pdfBtn} onClick={exportPDF}>حفظ PDF</button>
+        <button style={styles.copyBtn} onClick={copyReport}>{copied ? "اتنسخ ✓" : "نسخ التقرير"}</button>
+      </div>
+      <div className="no-print" style={styles.pdfNote}>بياناتك محفوظة على جهازك بس (مش بترفع لأي سيرفر)، وشغالة حتى من غير نت.</div>
+    </div>
+  );
+}
+
+const styles = {
+  page: { fontFamily: "'Tajawal', sans-serif", background: "#F3ECD8", backgroundImage: "repeating-linear-gradient(#F3ECD8, #F3ECD8 27px, #E4D8B4 28px)", minHeight: "100vh", padding: "16px 14px 40px", maxWidth: 480, margin: "0 auto", color: "#1F2A24" },
+  installBanner: { display: "flex", justifyContent: "space-between", alignItems: "center", background: "#1F4D3E", color: "#F3ECD8", borderRadius: 10, padding: "10px 12px", marginBottom: 12, fontSize: 12.5 },
+  installBtn: { background: "#D8B876", color: "#153229", border: "none", borderRadius: 6, padding: "6px 12px", fontWeight: 700, fontSize: 11.5, cursor: "pointer" },
+  installDismiss: { background: "transparent", color: "#C9BE99", border: "1px solid #C9BE99", borderRadius: 6, padding: "6px 10px", fontSize: 11.5, cursor: "pointer" },
+  cover: { background: "linear-gradient(160deg, #1F4D3E, #153229)", borderRadius: 14, padding: 4, marginBottom: 16, boxShadow: "0 6px 16px rgba(21,50,41,0.25)" },
+  coverInnerBorder: { border: "1.5px solid #B8863F", borderRadius: 10, padding: "18px 14px", textAlign: "center" },
+  coverTitle: { fontFamily: "'Amiri', serif", fontWeight: 700, fontSize: 28, color: "#F3ECD8", letterSpacing: 1 },
+  coverSub: { fontSize: 12, color: "#D8B876", marginTop: 4 },
+  card: { background: "rgba(255,255,255,0.35)", border: "1px solid #D9CBA3", borderRadius: 12, padding: 14, marginBottom: 14 },
+  cardTitle: { fontFamily: "'Amiri', serif", fontWeight: 700, fontSize: 17, color: "#1F4D3E", marginBottom: 10, borderBottom: "1px solid #C9B98A", paddingBottom: 6 },
+  fieldRow: { display: "flex", alignItems: "center", gap: 8, marginBottom: 6 },
+  fieldLabel: { fontSize: 13, color: "#4A4433", width: 130, flexShrink: 0 },
+  amountInput: { flex: 1, textAlign: "left", fontWeight: 700 },
+  currency: { fontSize: 12, color: "#8A7B4E", width: 24 },
+  addRow: { display: "flex", gap: 8, alignItems: "center", marginTop: 4 },
+  extraRow: { display: "flex", gap: 8, alignItems: "flex-end", marginTop: 8, flexWrap: "wrap" },
+  miniField: { display: "flex", flexDirection: "column", gap: 2, minWidth: 90 },
+  miniLabel: { fontSize: 10, color: "#8A7B4E" },
+  itemRow: { display: "flex", alignItems: "center", gap: 8, padding: "7px 0", borderBottom: "1px dashed #D9CBA3", fontSize: 14 },
+  itemName: { flex: 1 },
+  itemAmount: { fontWeight: 700, color: "#1F4D3E", minWidth: 70, textAlign: "left" },
+  itemDate: { fontSize: 11, color: "#9A8C61" },
+  monthsTag: { fontSize: 11, marginTop: 2, fontWeight: 500 },
+  freqBadge: { fontSize: 10, color: "#8A7B4E", background: "#E4D8B4", borderRadius: 6, padding: "1px 6px", marginRight: 6 },
+  catBadge: { fontSize: 10.5, color: "#5C5230", background: "#E4D8B4", borderRadius: 6, padding: "1px 6px", marginRight: 8 },
+  emptyNote: { fontSize: 12.5, color: "#9A8C61", fontStyle: "italic", padding: "6px 0" },
+  subtotal: { marginTop: 8, fontSize: 12.5, fontWeight: 700, color: "#5C5230", textAlign: "left" },
+  summaryCard: { background: "linear-gradient(160deg, #1F4D3E, #153229)", borderRadius: 14, padding: 18, color: "#F3ECD8", marginBottom: 16 },
+  printOnlyTitle: { display: "none" },
+  detailBlock: { marginBottom: 8 },
+  detailHeading: { fontSize: 12.5, fontWeight: 700, color: "#D8B876", marginBottom: 4 },
+  detailEmpty: { fontSize: 11.5, color: "#9A8C61", fontStyle: "italic" },
+  detailRow: { display: "flex", justifyContent: "space-between", fontSize: 12.5, color: "#DCD3B5", padding: "2px 0" },
+  summaryRow: { display: "flex", justifyContent: "space-between", fontSize: 14, padding: "4px 0", color: "#DCD3B5" },
+  summaryVal: { fontWeight: 700 },
+  divider: { borderTop: "1px solid #B8863F", margin: "8px 0", opacity: 0.6 },
+  summaryRowBig: { display: "flex", justifyContent: "space-between", fontSize: 19, fontFamily: "'Amiri', serif", fontWeight: 700, padding: "4px 0 10px" },
+  gaugeWrap: { marginTop: 6 },
+  gaugeTrack: { height: 8, borderRadius: 6, background: "rgba(255,255,255,0.15)", overflow: "hidden" },
+  gaugeFill: { height: "100%", borderRadius: 6, transition: "width 0.4s ease" },
+  gaugeLabel: { fontSize: 11.5, color: "#C9BE99", marginTop: 5, textAlign: "center" },
+  stamp: { marginTop: 14, border: "2px solid #D8B876", borderRadius: 10, padding: "10px 8px", textAlign: "center", fontFamily: "'Amiri', serif", fontWeight: 700, fontSize: 15, color: "#D8B876", transform: "rotate(-2deg)" },
+  stampSub: { fontFamily: "'Tajawal', sans-serif", fontWeight: 400, fontSize: 11, marginTop: 3, color: "#C9BE99" },
+  warnNote: { marginTop: 12, fontSize: 12.5, color: "#E8B4A0", textAlign: "center" },
+  tipsBlock: { marginTop: 16, paddingTop: 12, borderTop: "1px dashed rgba(216,184,118,0.4)" },
+  tipsHeading: { fontFamily: "'Amiri', serif", fontWeight: 700, fontSize: 14.5, color: "#D8B876", marginBottom: 8 },
+  tipRow: { fontSize: 12.5, color: "#DCD3B5", lineHeight: 1.6, padding: "5px 10px", marginBottom: 6, background: "rgba(255,255,255,0.06)", borderRadius: 4 },
+  bottomBtns: { display: "flex", gap: 6 },
+  resetBtn: { flex: 1, background: "transparent", border: "1px dashed #B8863F", borderRadius: 8, padding: "10px 4px", fontSize: 11, color: "#7A6A3F", fontFamily: "'Tajawal', sans-serif", cursor: "pointer" },
+  pdfBtn: { flex: 1, background: "#1F4D3E", border: "none", borderRadius: 8, padding: "10px 4px", fontSize: 11, color: "#F3ECD8", fontFamily: "'Tajawal', sans-serif", fontWeight: 700, cursor: "pointer" },
+  copyBtn: { flex: 1, background: "#B8863F", border: "none", borderRadius: 8, padding: "10px 4px", fontSize: 11, color: "#1F2A24", fontFamily: "'Tajawal', sans-serif", fontWeight: 700, cursor: "pointer" },
+  pdfNote: { fontSize: 10.5, color: "#8A7B4E", textAlign: "center", marginTop: 8, lineHeight: 1.5 },
+};
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<LedgerApp />);
+</script>
+
+<script>
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("sw.js").catch(() => {});
+    });
+  }
+</script>
+</body>
+</html>
